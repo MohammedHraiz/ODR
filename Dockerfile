@@ -17,6 +17,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py feeder.py generate_demo_audio.py start.sh icecast.xml ./
+COPY demo_music ./demo_music
 COPY static ./static
 COPY templates ./templates
 RUN chmod +x /app/start.sh \

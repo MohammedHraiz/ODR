@@ -6,7 +6,7 @@ Ghammas Baladi Radio is a centralized live MP3 station. A single container runs 
 
 The audio controller decodes the current MP3 to stereo 44.1 kHz PCM and writes it into one long-running FFmpeg MP3 encoder. That encoder keeps one source connection open to Icecast as the queue advances. Playlist edits take effect on the next track boundary; Skip terminates the active decoder and advances immediately. Listeners remain connected to Icecast through these changes.
 
-**Stack:** Python 3.12, FastAPI, Uvicorn, HTTPX, Icecast2 and FFmpeg. The responsive player and studio are plain HTML, CSS and JavaScript. Three original short synth/chime examples and the initial playlist are generated during the Docker build.
+**Stack:** Python 3.12, FastAPI, Uvicorn, HTTPX, Icecast2 and FFmpeg. The responsive player and studio are plain HTML, CSS and JavaScript. At least three distinct royalty-free MP3 tracks and the initial playlist are baked into the Docker image during build. User-provided MP3s in `demo_music/` take priority; missing slots are filled with verified Wikimedia Commons CC0 recordings, with original synthesized tracks as the offline build fallback. Sources include [Bach Cello Suite No. 1 Prelude](https://commons.wikimedia.org/wiki/File:Bach_Cello_Suite_1_Prelude_(BWV_1007)_Played_by_Chris.ogg), [Mozart Piano Sonata No. 14](https://commons.wikimedia.org/wiki/File:Mozart_-_Piano_Sonata_No._14.ogg), and [Beethoven Pathetique Sonata, II. Adagio](https://commons.wikimedia.org/wiki/File:Beethoven,_Sonata_No._8_in_C_Minor_Pathetique,_Op._13_-_II._Adagio_cantabile.ogg); each source page identifies the audio as CC0.
 
 ## Cloud architecture
 
@@ -25,7 +25,7 @@ flowchart LR
     end
 ```
 
-The container binds only FastAPI to `0.0.0.0:$PORT` (`8080` when unset). Icecast binds `127.0.0.1:8000` and is not a public service. The hosting platform terminates HTTPS at its edge; browser audio uses the same-origin secure `/stream` route.
+The container binds only FastAPI to `0.0.0.0:$PORT` (`8080` when unset). Icecast binds `127.0.0.1:8000` and is not a public service. The hosting platform terminates HTTPS at its edge; browser audio uses the same-origin secure `/stream` route. Initial royalty-free tracks and `playlist.json` are baked into the image, so cold starts on ephemeral PaaS storage have audio ready without a first-run download. For production libraries and durable uploads, use persistent object storage such as AWS S3 or Cloudflare R2.
 
 ## Deploy
 
@@ -41,7 +41,7 @@ Configure these application environment variables in the PaaS dashboard:
 
 The Icecast source uses the requested internal `source:hackme` credentials. It is loopback-only and not exposed through FastAPI. Do not add a public route for Icecast's administration interface.
 
-**Uploaded files and free tiers:** `/app/music` and `/app/playlist.json` live in the container filesystem by default. On platforms that replace the filesystem during redeploy or restart, uploads are ephemeral unless a persistent volume is available and mounted. To persist both together, mount a volume at `/data` and set `MUSIC_DIR=/data/music` and `PLAYLIST_FILE=/data/playlist.json`. On its first start with these paths, the startup script seeds the volume with the build's demo audio and playlist; later starts preserve its contents. Some free plans may sleep or restart workloads; continuous live radio requires an always-running instance. The application uses one process/container but cannot override platform sleep policies.
+**Uploaded files and free tiers:** Initial baked-in tracks survive container replacement because they are part of the image. Later admin uploads and playlist edits live in `/app/music` and `/app/playlist.json` by default and are ephemeral on filesystems replaced during restart or redeploy. For durable production uploads, use persistent object storage such as AWS S3 or Cloudflare R2 (or a PaaS persistent volume). Some free plans may sleep or restart workloads; continuous live radio requires an always-running instance. The application uses one process/container but cannot override platform sleep policies.
 
 ## Central operations and management
 
@@ -102,7 +102,7 @@ Use this section to record project-specific AI assistance. Remove credentials or
 
 ## Operational notes
 
-This is one live radio station per container. Run a single application worker; multiple FastAPI worker processes would each start their own feeder and contend for the same Icecast mount. If horizontal scaling is introduced, separate the source/encoder ownership from stateless web/API replicas. Configure PaaS health checks against `/api/now-playing` and monitor container logs for `radio.feeder` errors. The default demo clips are intentionally short so first deployment starts broadcasting quickly; replace them with licensed station audio during operations.
+This is one live radio station per container. Run a single application worker; multiple FastAPI worker processes would each start their own feeder and contend for the same Icecast mount. If horizontal scaling is introduced, separate the source/encoder ownership from stateless web/API replicas. Configure PaaS health checks against `/api/now-playing` and monitor container logs for `radio.feeder` errors. Supply licensed MP3s in `demo_music/` to bundle your preferred opening playlist; production libraries should be stored in durable object storage rather than the ephemeral container filesystem.
 
 ## Practical handoff checklist
 
