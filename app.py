@@ -70,6 +70,10 @@ class ReorderRequest(BaseModel):
     tracks: list[str]
 
 
+class PlayRequest(BaseModel):
+    filename: str
+
+
 @app.get("/", include_in_schema=False)
 async def home():
     return RedirectResponse("/listen", status_code=307)
@@ -85,14 +89,17 @@ async def admin_page():
     return FileResponse(ROOT / "templates" / "admin.html")
 
 
-@app.get("/api/now-playing")
-async def now_playing():
-    snapshot = await radio.snapshot()
+def shape_now_playing(snapshot: dict) -> dict:
     return {
         **snapshot,
         "track_title": re.sub(r"^\d{2} - ", "", Path(snapshot["current_track"]).stem) if snapshot["current_track"] else "Waiting for the next track",
         "is_live": snapshot["stream_status"] == "live",
     }
+
+
+@app.get("/api/now-playing")
+async def now_playing():
+    return shape_now_playing(await radio.snapshot())
 
 
 @app.get("/api/admin/session")
@@ -161,7 +168,7 @@ async def upload_tracks(
         total = 0
         try:
             with temp.open("wb") as output:
-                while chunk := await file.read(1024 * 1024):
+                while chunk := await file.read(64 * 1024):
                     total += len(chunk)
                     if total > MAX_UPLOAD:
                         raise HTTPException(413, "Each MP3 must be 150 MB or smaller")
@@ -205,7 +212,15 @@ async def skip_track(_: Annotated[str, Depends(admin_auth)]):
     result = await radio.skip()
     if not result["advanced"]:
         raise HTTPException(409, "No track is currently playing")
-    return {**result, "message": "Advancing to the next track"}
+    return {**shape_now_playing(await radio.snapshot()), **result, "message": "Advancing to the next track"}
+
+
+@app.post("/api/tracks/play")
+async def play_track(payload: PlayRequest, _: Annotated[str, Depends(admin_auth)]):
+    result = await radio.play(payload.filename)
+    if result is None:
+        raise HTTPException(404, "Track not found in the playlist")
+    return shape_now_playing(await radio.snapshot())
 
 
 if __name__ == "__main__":
