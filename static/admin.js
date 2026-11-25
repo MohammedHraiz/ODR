@@ -1,6 +1,9 @@
 (() => {
   let credentials = null;
   let tracks = [];
+  let reorderInFlight = false;
+  let refreshAfterReorder = false;
+  let draggedTrack = null;
   const playlistEl = document.getElementById('playlist');
   const toastEl = document.getElementById('toast');
   let toastTimer;
@@ -45,13 +48,15 @@
   function renderPlaylist() {
     document.getElementById('trackCount').textContent = `${tracks.length} ${tracks.length === 1 ? 'track' : 'tracks'}`;
     if (!tracks.length) { playlistEl.innerHTML = '<div class="empty-state">No tracks in rotation. Add an MP3 to get the broadcast moving.</div>'; return; }
-    playlistEl.innerHTML = tracks.map((name, index) => `<div class="track-row" data-index="${index}"><span class="track-number">${String(index + 1).padStart(2, '0')}</span><div class="track-info"><strong title="${escapeHtml(name)}">${escapeHtml(name.replace(/\.mp3$/i, ''))}</strong><small>${index === 0 ? 'Up next in rotation' : 'In the shared rotation'}</small></div><div class="track-actions"><button class="icon-button" data-action="up" aria-label="Move ${escapeHtml(name)} up" ${index === 0 ? 'disabled' : ''}>↑</button><button class="icon-button" data-action="down" aria-label="Move ${escapeHtml(name)} down" ${index === tracks.length - 1 ? 'disabled' : ''}>↓</button><button class="icon-button delete" data-action="delete" aria-label="Delete ${escapeHtml(name)}">×</button></div></div>`).join('');
+    playlistEl.innerHTML = tracks.map((name, index) => `<div class="track-row" draggable="${!reorderInFlight}" data-index="${index}"><span class="track-leading"><span class="drag-handle" aria-hidden="true">⋮⋮</span><span class="track-number">${String(index + 1).padStart(2, '0')}</span></span><div class="track-info"><strong title="${escapeHtml(name)}">${escapeHtml(name.replace(/\.mp3$/i, ''))}</strong><small>${index === 0 ? 'Up next in rotation' : 'In the shared rotation'}</small></div><div class="track-actions"><button class="icon-button" data-action="up" aria-label="Move ${escapeHtml(name)} up" ${index === 0 || reorderInFlight ? 'disabled' : ''}>↑</button><button class="icon-button" data-action="down" aria-label="Move ${escapeHtml(name)} down" ${index === tracks.length - 1 || reorderInFlight ? 'disabled' : ''}>↓</button><button class="icon-button delete" data-action="delete" aria-label="Delete ${escapeHtml(name)}" ${reorderInFlight ? 'disabled' : ''}>×</button></div></div>`).join('');
   }
 
   function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
   async function loadPlaylist() {
+    if (reorderInFlight) { refreshAfterReorder = true; return; }
     const data = await (await request('/api/now-playing')).json();
+    if (reorderInFlight) { refreshAfterReorder = true; return; }
     tracks = data.playlist || [];
     renderPlaylist();
     document.getElementById('liveTrack').textContent = data.track_title || 'Waiting for the next track';
@@ -60,22 +65,70 @@
     document.getElementById('statusLabel').textContent = data.stream_status === 'live' ? 'CENTRAL STUDIO · ON AIR' : 'CENTRAL STUDIO · RECONNECTING';
   }
 
-  async function saveOrder() {
-    await request('/api/tracks/reorder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tracks }) });
+  function persistOrder(previous) {
+    reorderInFlight = true;
     renderPlaylist();
-    toast('Playlist order updated');
+    request('/api/tracks/reorder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tracks }) })
+      .then(() => toast('Playlist order updated'))
+      .catch(error => { tracks = previous; renderPlaylist(); toast(error.message); })
+      .finally(() => {
+        reorderInFlight = false;
+        renderPlaylist();
+        if (refreshAfterReorder) { refreshAfterReorder = false; loadPlaylist().catch(() => {}); }
+      });
   }
 
-  playlistEl.addEventListener('click', async event => {
+  playlistEl.addEventListener('click', event => {
+    if (reorderInFlight) return;
     const button = event.target.closest('button[data-action]');
     if (!button) return;
     const row = button.closest('.track-row');
     const index = Number(row.dataset.index);
-    try {
-      if (button.dataset.action === 'up' && index > 0) { [tracks[index - 1], tracks[index]] = [tracks[index], tracks[index - 1]]; await saveOrder(); }
-      if (button.dataset.action === 'down' && index < tracks.length - 1) { [tracks[index + 1], tracks[index]] = [tracks[index], tracks[index + 1]]; await saveOrder(); }
-      if (button.dataset.action === 'delete') { await request('/api/tracks/' + encodeURIComponent(tracks[index]), { method: 'DELETE' }); await loadPlaylist(); toast('Track removed from rotation'); }
-    } catch (error) { toast(error.message); loadPlaylist().catch(() => {}); }
+    if (button.dataset.action === 'up' && index > 0) {
+      const previous = [...tracks]; [tracks[index - 1], tracks[index]] = [tracks[index], tracks[index - 1]]; renderPlaylist(); persistOrder(previous);
+    } else if (button.dataset.action === 'down' && index < tracks.length - 1) {
+      const previous = [...tracks]; [tracks[index + 1], tracks[index]] = [tracks[index], tracks[index + 1]]; renderPlaylist(); persistOrder(previous);
+    } else if (button.dataset.action === 'delete') {
+      request('/api/tracks/' + encodeURIComponent(tracks[index]), { method: 'DELETE' }).then(loadPlaylist).then(() => toast('Track removed from rotation')).catch(error => toast(error.message));
+    }
+  });
+
+  playlistEl.addEventListener('dragstart', event => {
+    if (reorderInFlight) { event.preventDefault(); return; }
+    const row = event.target.closest('.track-row');
+    if (!row || event.target.closest('button')) { event.preventDefault(); return; }
+    draggedTrack = tracks[Number(row.dataset.index)];
+    row.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', draggedTrack);
+  });
+  playlistEl.addEventListener('dragend', () => {
+    draggedTrack = null;
+    playlistEl.querySelectorAll('.dragging,.drop-target').forEach(row => row.classList.remove('dragging', 'drop-target'));
+  });
+  playlistEl.addEventListener('dragover', event => {
+    if (!draggedTrack || reorderInFlight) return;
+    event.preventDefault();
+    playlistEl.querySelectorAll('.drop-target').forEach(row => row.classList.remove('drop-target'));
+    const row = event.target.closest('.track-row');
+    if (row) row.classList.add('drop-target');
+    event.dataTransfer.dropEffect = 'move';
+  });
+  playlistEl.addEventListener('drop', event => {
+    if (!draggedTrack || reorderInFlight) return;
+    event.preventDefault();
+    const target = event.target.closest('.track-row');
+    if (!target) return;
+    const previous = [...tracks];
+    const from = tracks.indexOf(draggedTrack);
+    let to = Number(target.dataset.index);
+    const after = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+    if (after) to += 1;
+    if (from < to) to -= 1;
+    const [item] = tracks.splice(from, 1);
+    tracks.splice(Math.max(0, Math.min(to, tracks.length)), 0, item);
+    draggedTrack = null;
+    if (tracks.some((name, index) => name !== previous[index])) { renderPlaylist(); persistOrder(previous); }
   });
 
   document.getElementById('loginButton').addEventListener('click', signIn);
@@ -85,8 +138,14 @@
     if (!input.files.length) { toast('Choose at least one MP3 file'); return; }
     const form = new FormData();
     for (const file of input.files) form.append('files', file);
-    try { const result = await (await request('/api/tracks/upload', { method: 'POST', body: form })).json(); input.value = ''; await loadPlaylist(); toast(`${result.uploaded.length} track${result.uploaded.length === 1 ? '' : 's'} added`); }
+    try { const result = await (await request('/api/tracks/upload', { method: 'POST', body: form })).json(); input.value = ''; document.getElementById('selectedFiles').textContent = 'Choose one or more .mp3 files - 150 MB max each'; await loadPlaylist(); toast(`${result.uploaded.length} track${result.uploaded.length === 1 ? '' : 's'} added`); }
     catch (error) { toast(error.message); }
+  });
+  document.getElementById('files').addEventListener('change', event => {
+    const files = [...event.target.files];
+    document.getElementById('selectedFiles').textContent = files.length
+      ? `${files.length} ${files.length === 1 ? 'file' : 'files'} selected: ${files.map(file => file.name).join(', ')}`
+      : 'Choose one or more .mp3 files - 150 MB max each';
   });
   document.getElementById('skipButton').addEventListener('click', async () => {
     try { await request('/api/tracks/skip', { method: 'POST' }); toast('Skipping to the next track'); setTimeout(() => loadPlaylist().catch(() => {}), 500); }

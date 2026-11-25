@@ -202,8 +202,10 @@ async def delete_track(filename: str, _: Annotated[str, Depends(admin_auth)]):
 
 @app.post("/api/tracks/skip")
 async def skip_track(_: Annotated[str, Depends(admin_auth)]):
-    await radio.skip()
-    return {"skipped": radio.current_track, "message": "Advancing to the next track"}
+    result = await radio.skip()
+    if not result["advanced"]:
+        raise HTTPException(409, "No track is currently playing")
+    return {**result, "message": "Advancing to the next track"}
 
 
 if __name__ == "__main__":

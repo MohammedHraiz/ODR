@@ -23,6 +23,7 @@ class RadioFeeder:
         self.current_track: str | None = None
         self.stream_status = "starting"
         self.encoder: asyncio.subprocess.Process | None = None
+        self.decoder: asyncio.subprocess.Process | None = None
 
     async def load_playlist(self) -> list[str]:
         async with self.playlist_lock:
@@ -54,8 +55,19 @@ class RadioFeeder:
                 "stream_url": "/stream",
             }
 
-    async def skip(self) -> None:
-        self.skip_event.set()
+    async def skip(self) -> dict:
+        tracks = await self.load_playlist()
+        async with self.state_lock:
+            if self.decoder is None or self.current_track is None or not tracks:
+                return {"skipped": None, "next_track": self.current_track, "advanced": False}
+            skipped = self.current_track
+            if self.skip_event.is_set():
+                return {"skipped": skipped, "next_track": self.current_track, "advanced": True}
+            current_index = tracks.index(skipped) if skipped in tracks else -1
+            next_track = tracks[(current_index + 1) % len(tracks)]
+            self.current_track = next_track
+            self.skip_event.set()
+            return {"skipped": skipped, "next_track": next_track, "advanced": True}
 
     async def _set_state(self, *, track: str | None = None, status: str | None = None) -> None:
         async with self.state_lock:
@@ -77,35 +89,44 @@ class RadioFeeder:
 
     async def _play_track(self, filename: str) -> None:
         path = MUSIC_DIR / filename
+        await self._set_state(track=filename, status="live")
         decoder = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path),
+            "ffmpeg", "-re", "-hide_banner", "-loglevel", "error", "-i", str(path),
             "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "2", "pipe:1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
         )
+        self.decoder = decoder
         assert decoder.stdout is not None and self.encoder and self.encoder.stdin
-        await self._set_state(track=filename, status="live")
-        while True:
-            read_task = asyncio.create_task(decoder.stdout.read(CHUNK))
-            skip_task = asyncio.create_task(self.skip_event.wait())
-            done, pending = await asyncio.wait((read_task, skip_task), return_when=asyncio.FIRST_COMPLETED)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            if skip_task in done and self.skip_event.is_set():
+        try:
+            while True:
+                read_task = asyncio.create_task(decoder.stdout.read(CHUNK))
+                skip_task = asyncio.create_task(self.skip_event.wait())
+                done, pending = await asyncio.wait((read_task, skip_task), return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if skip_task in done and self.skip_event.is_set():
+                    if decoder.returncode is None:
+                        decoder.terminate()
+                    await decoder.wait()
+                    return
+                pcm = read_task.result()
+                if not pcm:
+                    await decoder.wait()
+                    if decoder.returncode:
+                        log.warning("Decoder failed for %s", filename)
+                    return
+                try:
+                    self.encoder.stdin.write(pcm)
+                    await self.encoder.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    raise RuntimeError("The Icecast encoder stopped accepting audio")
+        finally:
+            if decoder.returncode is None:
                 decoder.terminate()
                 await decoder.wait()
-                return
-            pcm = read_task.result()
-            if not pcm:
-                await decoder.wait()
-                if decoder.returncode:
-                    log.warning("Decoder failed for %s", filename)
-                return
-            try:
-                self.encoder.stdin.write(pcm)
-                await self.encoder.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError):
-                raise RuntimeError("The Icecast encoder stopped accepting audio")
+            if self.decoder is decoder:
+                self.decoder = None
 
     async def run(self) -> None:
         while True:
